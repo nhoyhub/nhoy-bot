@@ -8,10 +8,9 @@ const QR_PHOTO = "https://i.pinimg.com/736x/c2/c5/03/c2c50300cc357884d7819e57e4e
 const SUCCESS_PHOTO = "https://i.pinimg.com/originals/23/50/8e/23508e8b1e8dea194d9e06ae507e4afc.gif";
 const REJECT_PHOTO = "https://i.pinimg.com/originals/a5/75/0b/a5750babcf0f417f30e0b4773b29e376.gif";
 
-// --- HELPER: KV STORAGE WRAPPER ---
+// --- KV STORAGE WRAPPER ---
 const db = {
     async get(env, key) {
-        // Handle case where KV might be undefined during local dev without setup
         if (!env.SHOP_SESSION) return null;
         const val = await env.SHOP_SESSION.get(key);
         return val ? JSON.parse(val) : null;
@@ -37,10 +36,10 @@ export default {
         bot1.command('start', async (ctx) => {
             const userId = ctx.from.id;
             await db.del(env, `user:${userId}`);
-            
+
             const caption = "🎉 *ស្វាគមន៍!*\n1️⃣ Download UDID Profile\n2️⃣ Send UDID here";
             await ctx.replyWithPhoto(START_PHOTO, {
-                caption: caption,
+                caption,
                 parse_mode: 'Markdown',
                 ...Markup.inlineKeyboard([Markup.button.url('📱 Download Profile', 'https://udid.tech/download-profile')])
             });
@@ -48,8 +47,8 @@ export default {
 
         bot1.on('text', async (ctx) => {
             const text = ctx.message.text.trim();
-            if(text.startsWith('/')) return;
-            
+            if (text.startsWith('/')) return;
+
             if (!/^[a-fA-F0-9-]{20,50}$/.test(text)) {
                 return ctx.reply("❌ Invalid UDID format.");
             }
@@ -66,9 +65,9 @@ export default {
         bot1.action('pay_10', async (ctx) => {
             const userId = ctx.from.id;
             const data = await db.get(env, `user:${userId}`);
-            
-            if(!data) return ctx.reply("❌ Session expired. /start again.");
-            
+
+            if (!data) return ctx.reply("❌ Session expired. /start again.");
+
             data.payment = "10";
             await db.set(env, `user:${userId}`, data);
 
@@ -82,14 +81,14 @@ export default {
         bot1.on('photo', async (ctx) => {
             const userId = ctx.from.id;
             const data = await db.get(env, `user:${userId}`);
-            if(!data || !data.payment) return ctx.reply("❌ Please start over /start");
+            if (!data || !data.payment) return ctx.reply("❌ Please start over /start");
 
             const username = ctx.from.username || ctx.from.first_name;
-            
-            const approvalData = { 
-                id: userId, 
-                username, 
-                udid: data.udid, 
+
+            const approvalData = {
+                id: userId,
+                username,
+                udid: data.udid,
                 price: data.payment,
                 time: new Date().toISOString()
             };
@@ -97,12 +96,12 @@ export default {
 
             await ctx.reply("⏳ Checking payment...");
 
-            const adminMsg = 
+            const adminMsg =
                 `🔍 *New Request*\n` +
                 `👤 User: ${username} (ID: ${userId})\n` +
                 `📱 UDID: \`${data.udid}\`\n` +
                 `💰 Price: $${data.payment}`;
-            
+
             const adminKeyboard = {
                 inline_keyboard: [
                     [{ text: "✅ Approve", callback_data: `ok_${userId}` }, { text: "❌ Reject", callback_data: `no_${userId}` }],
@@ -110,11 +109,27 @@ export default {
                 ]
             };
 
-            await fetch(`https://api.telegram.org/bot${env.BOT_2_TOKEN}/sendMessage`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ chat_id: env.ADMIN_CHAT_ID, text: adminMsg, parse_mode: 'Markdown', reply_markup: adminKeyboard })
-            });
+            try {
+                const res = await fetch(`https://api.telegram.org/bot${env.BOT_2_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: env.ADMIN_CHAT_ID,
+                        text: adminMsg,
+                        parse_mode: 'Markdown',
+                        reply_markup: adminKeyboard
+                    })
+                });
+                const json = await res.json();
+                console.log('Admin message response:', json);
+
+                if (!json.ok) {
+                    await ctx.reply("❌ Cannot notify admin. Please check ADMIN_CHAT_ID and Bot 2 permissions.");
+                }
+            } catch (err) {
+                console.log("Error sending to admin:", err);
+                await ctx.reply("❌ Failed to notify admin.");
+            }
         });
 
         // --- BOT 2 LOGIC (ADMIN) ---
@@ -122,20 +137,18 @@ export default {
             const data = ctx.callbackQuery.data;
             const [action, userId] = data.split('_');
 
-            if (action === 'cp') {
-                const pending = await db.get(env, `pending:${userId}`);
-                if(pending) return ctx.reply(`\`${pending.udid}\``, { parse_mode: 'MarkdownV2' });
-                return ctx.reply("Data not found");
-            }
-
             const pending = await db.get(env, `pending:${userId}`);
             if (!pending) return ctx.editMessageText("❌ Data expired or already processed.");
+
+            if (action === 'cp') {
+                return ctx.reply(`\`${pending.udid}\``, { parse_mode: 'MarkdownV2' });
+            }
 
             if (action === 'ok') {
                 try {
                     await fetch(env.BACKEND_API_URL, {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             user_id: pending.id,
                             username: pending.username,
@@ -144,24 +157,24 @@ export default {
                             completion_time: new Date().toISOString()
                         })
                     });
-                } catch(e) { console.log("Backend Save Error", e); }
+                } catch (e) { console.log("Backend Save Error", e); }
 
                 await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ 
-                        chat_id: pending.id, 
-                        photo: SUCCESS_PHOTO, 
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: pending.id,
+                        photo: SUCCESS_PHOTO,
                         caption: `✅ *Approved!*\n\nUDID: \`${pending.udid}\`\nWait for processing...`,
                         parse_mode: 'Markdown'
                     })
                 });
-                
+
                 await ctx.editMessageText(`✅ Approved for ${pending.username}`);
             } else {
                 await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ chat_id: pending.id, photo: REJECT_PHOTO, caption: "❌ Request Rejected." })
                 });
                 await ctx.editMessageText(`❌ Rejected ${pending.username}`);
@@ -175,8 +188,7 @@ export default {
         if (url.pathname === `/bot1`) {
             await bot1.handleUpdate(await request.json());
             return new Response('Ok');
-        } 
-        else if (url.pathname === `/bot2`) {
+        } else if (url.pathname === `/bot2`) {
             await bot2.handleUpdate(await request.json());
             return new Response('Ok');
         }

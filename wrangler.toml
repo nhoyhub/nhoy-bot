@@ -1,20 +1,15 @@
-
 name = "esign-shop-bot"
 main = "src/index.js"
 compatibility_date = "2024-09-23"
 
-# 🔴 REMOVE or COMMENT OUT this line:
-# compatibility_flags = ["nodejs_compat"]
-
-# 🟢 ADD this line instead:
-node_compat = true
+# Use nodejs compatibility for Wrangler v4+
+compatibility_flags = ["nodejs_compat"]
 
 kv_namespaces = [
   { binding = "SHOP_SESSION", id = "3fe2622c9e334cbda7fa1cc69c6d2353" }
 ]
 
 [vars]
-# Make sure to replace these with your NEW, SECURE tokens
 BOT_TOKEN = "7586151294:AAE56w1KsB01qmfebOY4jccne2VI11ueMqM"
 BOT_2_TOKEN = "7836377853:AAHvTlYlqK-TbvbwVRzvG5oPotaFdNntn3A"
 ADMIN_CHAT_ID = "1732455712"
