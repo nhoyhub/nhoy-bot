@@ -1,0 +1,8 @@
+{
+  "name": "telegram-shop-worker",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "dependencies": {
+    "telegraf": "^4.15.0"
+  }
+}
