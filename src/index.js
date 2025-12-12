@@ -1,4 +1,4 @@
-const { Telegraf, Markup } = require('telegraf');
+import { Telegraf, Markup } from 'telegraf';
 
 // --- CONSTANTS ---
 const ABA_PAY_LINK = "https://pay.ababank.com/oRF8/2ug5pzi4";
@@ -9,16 +9,19 @@ const SUCCESS_PHOTO = "https://i.pinimg.com/originals/23/50/8e/23508e8b1e8dea194
 const REJECT_PHOTO = "https://i.pinimg.com/originals/a5/75/0b/a5750babcf0f417f30e0b4773b29e376.gif";
 
 // --- HELPER: KV STORAGE WRAPPER ---
-// This saves user data to Cloudflare Database because Workers reset memory
 const db = {
     async get(env, key) {
+        // Handle case where KV might be undefined during local dev without setup
+        if (!env.SHOP_SESSION) return null;
         const val = await env.SHOP_SESSION.get(key);
         return val ? JSON.parse(val) : null;
     },
     async set(env, key, val) {
+        if (!env.SHOP_SESSION) return;
         await env.SHOP_SESSION.put(key, JSON.stringify(val));
     },
     async del(env, key) {
+        if (!env.SHOP_SESSION) return;
         await env.SHOP_SESSION.delete(key);
     }
 };
@@ -33,7 +36,7 @@ export default {
         // --- BOT 1 LOGIC (USER) ---
         bot1.command('start', async (ctx) => {
             const userId = ctx.from.id;
-            await db.del(env, `user:${userId}`); // Clear session
+            await db.del(env, `user:${userId}`);
             
             const caption = "🎉 *ស្វាគមន៍!*\n1️⃣ Download UDID Profile\n2️⃣ Send UDID here";
             await ctx.replyWithPhoto(START_PHOTO, {
@@ -47,12 +50,10 @@ export default {
             const text = ctx.message.text.trim();
             if(text.startsWith('/')) return;
             
-            // Validate UDID
             if (!/^[a-fA-F0-9-]{20,50}$/.test(text)) {
                 return ctx.reply("❌ Invalid UDID format.");
             }
 
-            // Save UDID to Cloudflare KV
             await db.set(env, `user:${ctx.from.id}`, { udid: text });
 
             await ctx.replyWithPhoto(PAYMENT_PHOTO, {
@@ -68,7 +69,6 @@ export default {
             
             if(!data) return ctx.reply("❌ Session expired. /start again.");
             
-            // Update session with price
             data.payment = "10";
             await db.set(env, `user:${userId}`, data);
 
@@ -86,7 +86,6 @@ export default {
 
             const username = ctx.from.username || ctx.from.first_name;
             
-            // Save pending approval to KV
             const approvalData = { 
                 id: userId, 
                 username, 
@@ -98,7 +97,6 @@ export default {
 
             await ctx.reply("⏳ Checking payment...");
 
-            // NOTIFY ADMIN BOT (Bot 2)
             const adminMsg = 
                 `🔍 *New Request*\n` +
                 `👤 User: ${username} (ID: ${userId})\n` +
@@ -112,7 +110,6 @@ export default {
                 ]
             };
 
-            // Send to Admin using standard Fetch (Bot 2 Token)
             await fetch(`https://api.telegram.org/bot${env.BOT_2_TOKEN}/sendMessage`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -135,7 +132,6 @@ export default {
             if (!pending) return ctx.editMessageText("❌ Data expired or already processed.");
 
             if (action === 'ok') {
-                // 1. SAVE TO RENDER BACKEND
                 try {
                     await fetch(env.BACKEND_API_URL, {
                         method: 'POST',
@@ -150,7 +146,6 @@ export default {
                     });
                 } catch(e) { console.log("Backend Save Error", e); }
 
-                // 2. NOTIFY USER (Bot 1)
                 await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -164,7 +159,6 @@ export default {
                 
                 await ctx.editMessageText(`✅ Approved for ${pending.username}`);
             } else {
-                // REJECT
                 await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -173,13 +167,11 @@ export default {
                 await ctx.editMessageText(`❌ Rejected ${pending.username}`);
             }
 
-            // Cleanup KV
             await db.del(env, `pending:${userId}`);
             await db.del(env, `user:${userId}`);
         });
 
         // --- ROUTING ---
-        // We use secret paths to distinguish updates
         if (url.pathname === `/bot1`) {
             await bot1.handleUpdate(await request.json());
             return new Response('Ok');

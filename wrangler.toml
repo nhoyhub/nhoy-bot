@@ -1,15 +1,17 @@
 name = "esign-shop-bot"
 main = "src/index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
 
-# Create this KV namespace in Cloudflare Dashboard later!
-# Run: npx wrangler kv:namespace create "SHOP_SESSION"
+# ⚠️ RUN THIS COMMAND IN TERMINAL: npx wrangler kv:namespace create "SHOP_SESSION"
+# Then copy the "id" it gives you and paste it below:
 kv_namespaces = [
-  { binding = "SHOP_SESSION", id = "REPLACE_WITH_YOUR_KV_ID_AFTER_CREATING" }
+  { binding = "SHOP_SESSION", id = "3fe2622c9e334cbda7fa1cc69c6d2353" }
 ]
 
 [vars]
-# You will set these securely in Cloudflare Dashboard, but placeholders here:
+# You should ideally use "npx wrangler secret put BOT_TOKEN" for security,
+# but for now, you can keep them here for testing.
 BOT_TOKEN = "7586151294:AAE56w1KsB01qmfebOY4jccne2VI11ueMqM"
 BOT_2_TOKEN = "7836377853:AAHvTlYlqK-TbvbwVRzvG5oPotaFdNntn3A"
 ADMIN_CHAT_ID = "1732455712"
