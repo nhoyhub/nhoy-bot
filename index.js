@@ -1,380 +1,194 @@
-// bot.js
 const { Telegraf, Markup } = require('telegraf');
-const axios = require('axios');
 
-// --- CONFIGURATION ---
-const BOT_TOKEN = "7586151294:AAE56w1KsB01qmfebOY4jccne2VI11ueMqM";
-const BOT_2_TOKEN = "7836377853:AAHvTlYlqK-TbvbwVRzvG5oPotaFdNntn3A"; // Admin Bot
-
-// Admin Chat IDs
-const BOT_2_ADMIN_CHAT_ID = "1732455712";
-
-// Link to Backend
-const BACKEND_API_URL = "http://127.0.0.1:5000/api/v1/save_order";
-
-// Payment Link
+// --- CONSTANTS ---
 const ABA_PAY_LINK = "https://pay.ababank.com/oRF8/2ug5pzi4";
+const START_PHOTO = "https://i.pinimg.com/736x/fa/af/0a/faaf0a3dbfeff4591b189d7b5016ae04.jpg";
+const PAYMENT_PHOTO = "https://i.pinimg.com/1200x/44/4b/af/444baf1fba6fcf56f53d3740162d2e61.jpg";
+const QR_PHOTO = "https://i.pinimg.com/736x/c2/c5/03/c2c50300cc357884d7819e57e4e9d860.jpg";
+const SUCCESS_PHOTO = "https://i.pinimg.com/originals/23/50/8e/23508e8b1e8dea194d9e06ae507e4afc.gif";
+const REJECT_PHOTO = "https://i.pinimg.com/originals/a5/75/0b/a5750babcf0f417f30e0b4773b29e376.gif";
 
-// --- ASSET URLs ---
-const START_PHOTO_URL = "https://i.pinimg.com/736x/fa/af/0a/faaf0a3dbfeff4591b189d7b5016ae04.jpg";
-const PAYMENT_PHOTO_URL = "https://i.pinimg.com/1200x/44/4b/af/444baf1fba6fcf56f53d3740162d2e61.jpg";
-const QR_PHOTO_10_URL = "https://i.pinimg.com/736x/c2/c5/03/c2c50300cc357884d7819e57e4e9d860.jpg";
-const SUCCESS_PHOTO_URL = "https://i.pinimg.com/originals/23/50/8e/23508e8b1e8dea194d9e06ae507e4afc.gif";
-const REJECTED_PHOTO_URL = "https://i.pinimg.com/originals/a5/75/0b/a5750babcf0f417f30e0b4773b29e376.gif";
-
-// --- IN-MEMORY DATA ---
-const userData = {}; // Map: userId -> { udid, payment_option }
-const pendingApprovals = {}; // Map: userId -> { username, udid, payment_option, timestamp }
-const completedOrders = {}; // Map: userId -> { username, udid, payment_option, completion_time }
-
-// --- INITIALIZE BOTS ---
-const bot1 = new Telegraf(BOT_TOKEN);
-const bot2 = new Telegraf(BOT_2_TOKEN);
-
-// --- HELPER FUNCTIONS ---
-
-// Escape MarkdownV2 characters
-const escapeMarkdown = (text) => {
-    if (!text) return '';
-    return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
-};
-
-const validateUdid = (udid) => {
-    if (!udid) return false;
-    const regex = /^[a-fA-F0-9-]{20,50}$/;
-    return regex.test(udid);
-};
-
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-const sendAlertAfter30s = async (userId) => {
-    await sleep(30000);
-    // Placeholder for future logic
-    console.log(`⏰ 30s timer finished for user ${userId}`);
-};
-
-// Send request to Admin via Bot 2
-const sendToBot2ForApproval = async (userId, username, udid, paymentOption) => {
-    const currentTime = new Date().toLocaleString();
-
-    const messageText = 
-        `🔍 សំណើរស្នើសុំការអនុម័ត\n\n` +
-        `👤 អ្នកប្រើប្រាស់: ${username}\n` +
-        `🆔 លេខសំគាល់: ${userId}\n` +
-        `📱 UDID: ${udid}\n` +
-        `💳 តម្លៃបង់ប្រាក់: ${paymentOption}\n` +
-        `⏰ ពេលវេលា: ${currentTime}\n\n` +
-        `សូមពិនិត្យនិងសម្រេចចិត្ត:`;
-
-    const keyboard = Markup.inlineKeyboard([
-        [
-            Markup.button.callback('✅ អនុម័ត', `approve_${userId}`),
-            Markup.button.callback('❌ បដិសេធ', `reject_${userId}`)
-        ],
-        [
-            Markup.button.callback('📋 ចម្លង UDID', `copyudid_${userId}`)
-        ]
-    ]);
-
-    try {
-        await bot2.telegram.sendMessage(BOT_2_ADMIN_CHAT_ID, messageText, keyboard);
-        return true;
-    } catch (e) {
-        console.error(`Error sending to Bot 2: ${e.message}`);
-        return false;
+// --- HELPER: KV STORAGE WRAPPER ---
+// This saves user data to Cloudflare Database because Workers reset memory
+const db = {
+    async get(env, key) {
+        const val = await env.SHOP_SESSION.get(key);
+        return val ? JSON.parse(val) : null;
+    },
+    async set(env, key, val) {
+        await env.SHOP_SESSION.put(key, JSON.stringify(val));
+    },
+    async del(env, key) {
+        await env.SHOP_SESSION.delete(key);
     }
 };
 
-// Handle approval/rejection logic
-const sendResponseToUser = async (userId, approved) => {
-    let userInfo = pendingApprovals[userId];
+// --- WORKER ENTRY POINT ---
+export default {
+    async fetch(request, env) {
+        const bot1 = new Telegraf(env.BOT_TOKEN);
+        const bot2 = new Telegraf(env.BOT_2_TOKEN);
+        const url = new URL(request.url);
 
-    // Fallback if memory cleared
-    if (!userInfo && completedOrders[userId]) {
-        userInfo = completedOrders[userId];
-    }
-
-    if (approved && userInfo) {
-        const username = userInfo.username || 'Unknown';
-        const udid = userInfo.udid || 'N/A';
-        const paymentOption = userInfo.payment_option || '0';
-        const displayName = username.startsWith('@') ? username.replace('@', '') : username;
-        
-        // --- SAVE TO BACKEND ---
-        const payloadDb = {
-            user_id: userId,
-            username: username,
-            udid: udid,
-            payment_option: paymentOption,
-            completion_time: new Date().toISOString()
-        };
-
-        console.log(`🔄 Sending data to Backend for User ${userId}...`);
-
-        try {
-            const response = await axios.post(BACKEND_API_URL, payloadDb, {
-                headers: { 'Content-Type': 'application/json' }
-            });
+        // --- BOT 1 LOGIC (USER) ---
+        bot1.command('start', async (ctx) => {
+            const userId = ctx.from.id;
+            await db.del(env, `user:${userId}`); // Clear session
             
-            if (response.status === 200) {
-                console.log(`✅ Data saved to Web Backend for ${userId}`);
-            } else {
-                console.error(`❌ Failed to save to DB. Status: ${response.status}`);
+            const caption = "🎉 *ស្វាគមន៍!*\n1️⃣ Download UDID Profile\n2️⃣ Send UDID here";
+            await ctx.replyWithPhoto(START_PHOTO, {
+                caption: caption,
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([Markup.button.url('📱 Download Profile', 'https://udid.tech/download-profile')])
+            });
+        });
+
+        bot1.on('text', async (ctx) => {
+            const text = ctx.message.text.trim();
+            if(text.startsWith('/')) return;
+            
+            // Validate UDID
+            if (!/^[a-fA-F0-9-]{20,50}$/.test(text)) {
+                return ctx.reply("❌ Invalid UDID format.");
             }
-        } catch (e) {
-            console.error(`❌ Connection error to Backend: ${e.message}`);
-        }
 
-        // Save to local cache
-        completedOrders[userId] = {
-            username: username,
-            udid: udid,
-            payment_option: paymentOption,
-            completion_time: new Date().toLocaleString()
-        };
+            // Save UDID to Cloudflare KV
+            await db.set(env, `user:${ctx.from.id}`, { udid: text });
 
-        const caption = 
-            `🎉 *អរគុណ ${escapeMarkdown(displayName)}\\!* ✅\n\n` +
-            `ការបញ្ជាទិញបានបញ្ចប់ហើយ\\. 🎊\n\n` +
-            `📱 UDID: \`${escapeMarkdown(udid)}\`\n` +
-            `💰 តម្លៃ: \`$${paymentOption}\`\n` +
-            `⏳ កំពុងដំណេីរការ\n\n` +
-            `🔄 ទិញថ្មី​​ សូមចុច​​​​ /start \n` +
-            `📋 ពិនិត្យការទិញបានបញ្ចប់ /details`;
-
-        // Send Success Photo via Bot 1
-        try {
-            await bot1.telegram.sendPhoto(userId, SUCCESS_PHOTO_URL, {
-                caption: caption,
-                parse_mode: 'MarkdownV2'
+            await ctx.replyWithPhoto(PAYMENT_PHOTO, {
+                caption: `✅ UDID: \`${text}\`\n👇 Select Price:`,
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([Markup.button.callback('🟢 10$ - Premium', 'pay_10')])
             });
-            // Trigger 30s alert
-            sendAlertAfter30s(userId);
-        } catch (e) {
-            console.error(`Failed to send success msg: ${e.message}`);
-            return false;
-        }
+        });
 
-    } else {
-        // Rejected
-        const caption = 
-            "❌ *សំណើរមិនត្រូវបានអនុម័ត*\n\n" +
-            "សូមព្យាយាមម្តងទៀតឬទាក់ទងផ្នែកជំនួយ\\.\n" +
-            "ទិញម្តងទៀត /start  \\.";
+        bot1.action('pay_10', async (ctx) => {
+            const userId = ctx.from.id;
+            const data = await db.get(env, `user:${userId}`);
             
-        try {
-            await bot1.telegram.sendPhoto(userId, REJECTED_PHOTO_URL, {
-                caption: caption,
-                parse_mode: 'MarkdownV2'
+            if(!data) return ctx.reply("❌ Session expired. /start again.");
+            
+            // Update session with price
+            data.payment = "10";
+            await db.set(env, `user:${userId}`, data);
+
+            await ctx.replyWithPhoto(QR_PHOTO, {
+                caption: `💳 *Price: $10*\n📱 UDID: \`${data.udid}\`\n\nSend Screenshot here after pay.`,
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([Markup.button.url('Pay Now', ABA_PAY_LINK)])
             });
-        } catch (e) {
-            console.error(`Failed to send reject msg: ${e.message}`);
-            return false;
+        });
+
+        bot1.on('photo', async (ctx) => {
+            const userId = ctx.from.id;
+            const data = await db.get(env, `user:${userId}`);
+            if(!data || !data.payment) return ctx.reply("❌ Please start over /start");
+
+            const username = ctx.from.username || ctx.from.first_name;
+            
+            // Save pending approval to KV
+            const approvalData = { 
+                id: userId, 
+                username, 
+                udid: data.udid, 
+                price: data.payment,
+                time: new Date().toISOString()
+            };
+            await db.set(env, `pending:${userId}`, approvalData);
+
+            await ctx.reply("⏳ Checking payment...");
+
+            // NOTIFY ADMIN BOT (Bot 2)
+            const adminMsg = 
+                `🔍 *New Request*\n` +
+                `👤 User: ${username} (ID: ${userId})\n` +
+                `📱 UDID: \`${data.udid}\`\n` +
+                `💰 Price: $${data.payment}`;
+            
+            const adminKeyboard = {
+                inline_keyboard: [
+                    [{ text: "✅ Approve", callback_data: `ok_${userId}` }, { text: "❌ Reject", callback_data: `no_${userId}` }],
+                    [{ text: "📋 Copy UDID", callback_data: `cp_${userId}` }]
+                ]
+            };
+
+            // Send to Admin using standard Fetch (Bot 2 Token)
+            await fetch(`https://api.telegram.org/bot${env.BOT_2_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ chat_id: env.ADMIN_CHAT_ID, text: adminMsg, parse_mode: 'Markdown', reply_markup: adminKeyboard })
+            });
+        });
+
+        // --- BOT 2 LOGIC (ADMIN) ---
+        bot2.on('callback_query', async (ctx) => {
+            const data = ctx.callbackQuery.data;
+            const [action, userId] = data.split('_');
+
+            if (action === 'cp') {
+                const pending = await db.get(env, `pending:${userId}`);
+                if(pending) return ctx.reply(`\`${pending.udid}\``, { parse_mode: 'MarkdownV2' });
+                return ctx.reply("Data not found");
+            }
+
+            const pending = await db.get(env, `pending:${userId}`);
+            if (!pending) return ctx.editMessageText("❌ Data expired or already processed.");
+
+            if (action === 'ok') {
+                // 1. SAVE TO RENDER BACKEND
+                try {
+                    await fetch(env.BACKEND_API_URL, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            user_id: pending.id,
+                            username: pending.username,
+                            udid: pending.udid,
+                            payment_option: pending.price,
+                            completion_time: new Date().toISOString()
+                        })
+                    });
+                } catch(e) { console.log("Backend Save Error", e); }
+
+                // 2. NOTIFY USER (Bot 1)
+                await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ 
+                        chat_id: pending.id, 
+                        photo: SUCCESS_PHOTO, 
+                        caption: `✅ *Approved!*\n\nUDID: \`${pending.udid}\`\nWait for processing...`,
+                        parse_mode: 'Markdown'
+                    })
+                });
+                
+                await ctx.editMessageText(`✅ Approved for ${pending.username}`);
+            } else {
+                // REJECT
+                await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ chat_id: pending.id, photo: REJECT_PHOTO, caption: "❌ Request Rejected." })
+                });
+                await ctx.editMessageText(`❌ Rejected ${pending.username}`);
+            }
+
+            // Cleanup KV
+            await db.del(env, `pending:${userId}`);
+            await db.del(env, `user:${userId}`);
+        });
+
+        // --- ROUTING ---
+        // We use secret paths to distinguish updates
+        if (url.pathname === `/bot1`) {
+            await bot1.handleUpdate(await request.json());
+            return new Response('Ok');
+        } 
+        else if (url.pathname === `/bot2`) {
+            await bot2.handleUpdate(await request.json());
+            return new Response('Ok');
         }
+
+        return new Response('Bot Worker Running. Set Webhooks to /bot1 and /bot2');
     }
-    return true;
 };
-
-// --- BOT 1 HANDLERS (USER) ---
-
-bot1.command('start', async (ctx) => {
-    const user = ctx.from;
-    const userId = user.id;
-
-    // Reset session
-    delete userData[userId];
-
-    const HELP_URL = "https://t.me/Irra_Esign/3";
-    const caption = 
-        `🎉 *ស្វាគមន៍ ${escapeMarkdown(user.first_name)}\\!* 🎉\n\n` +
-        "📋 *របៀបចាប់ផ្តើម:*\n\n" +
-        "1️⃣ ចុចប៊ូតុងខាងក្រោមដើម្បីទាញយក UDID profile\\.\n" +
-        "2️⃣ ដំឡើងវានៅលើឧបករណ៍របស់អ្នក\\.\n" +
-        "3️⃣ ចម្លង UDID របស់អ្នកនិងផ្ញើមកខ្ញុំ\\.\n\n" +
-        `💡 [${escapeMarkdown('របៀប​ Download UDID profile?')}](${escapeMarkdown(HELP_URL)}) `;
-
-    const keyboard = Markup.inlineKeyboard([
-        Markup.button.url('📱 ទាញយក UDID Profile', 'https://udid.tech/download-profile')
-    ]);
-
-    await ctx.replyWithPhoto(START_PHOTO_URL, {
-        caption: caption,
-        parse_mode: 'MarkdownV2',
-        ...keyboard
-    });
-});
-
-bot1.command('details', async (ctx) => {
-    const userId = ctx.from.id;
-    if (!completedOrders[userId]) {
-        return ctx.reply("❌ *រកមិនឃើញព័ត៌មានការបញ្ជាទិញ*\nសូមបញ្ជាទិញជាមុនសិន /start", { parse_mode: 'MarkdownV2' });
-    }
-
-    const info = completedOrders[userId];
-    const text = 
-        `📋 *ព័ត៌មានការបញ្ជាទិញ*\n\n` +
-        `📱 UDID: \`${escapeMarkdown(info.udid)}\`\n` +
-        `💳 Price: \`$${info.payment_option}\`\n` +
-        `⏰ Date: \`${escapeMarkdown(info.completion_time)}\``;
-    
-    await ctx.reply(text, { parse_mode: 'MarkdownV2' });
-});
-
-// Handle Payment Selection Callback
-bot1.action(/^payment_/, async (ctx) => {
-    const userId = ctx.from.id;
-    await ctx.answerCbQuery();
-
-    if (!userData[userId]) {
-        return ctx.editMessageText("❌ Session expired. សូមចុច /start ម្តងទៀត។");
-    }
-
-    const paymentOption = ctx.match.input.split('_')[1]; // Extracts '10' from 'payment_10'
-    userData[userId].payment_option = paymentOption;
-
-    const caption = 
-        `💳 *Esign Premium \\- $${paymentOption}*\n` +
-        `📱 *UDID:* \`${escapeMarkdown(userData[userId].udid)}\`\n\n` +
-        `1️⃣ Scan QR code ឬចុចប៊ូតុង Pay Now\n` +
-        `2️⃣ ថតរូបភាពបង់ប្រាក់ \\(Screenshot\\)\n` +
-        `3️⃣ ផ្ញើរូបភាពចូលក្នុង Chat នេះ\\.`;
-
-    const keyboard = Markup.inlineKeyboard([
-        Markup.button.url('Pay Now', ABA_PAY_LINK)
-    ]);
-
-    // Edit previous caption
-    try {
-        await ctx.editMessageCaption("✅ កំពុងដំណើរការ...", { reply_markup: undefined });
-    } catch (e) { /* ignore */ }
-
-    // Send new QR photo
-    await ctx.replyWithPhoto(QR_PHOTO_10_URL, {
-        caption: caption,
-        parse_mode: 'MarkdownV2',
-        ...keyboard
-    });
-});
-
-// Handle Photo (Screenshot)
-bot1.on('photo', async (ctx) => {
-    const user = ctx.from;
-    const userId = user.id;
-
-    if (!userData[userId] || !userData[userId].payment_option) {
-        return ctx.reply("❌ សូមចុច /start ដើម្បីចាប់ផ្តើម។");
-    }
-
-    if (pendingApprovals[userId]) {
-        return ctx.reply("⏳ សំណើររបស់អ្នកកំពុងត្រូវបានត្រួតពិនិត្យ។");
-    }
-
-    const username = user.username ? `@${user.username}` : user.first_name;
-
-    pendingApprovals[userId] = {
-        username: username,
-        udid: userData[userId].udid,
-        payment_option: userData[userId].payment_option,
-        timestamp: new Date()
-    };
-
-    await ctx.reply("🔄 បានទទួលរូបភាព។ សូមរង់ចាំ Admin ត្រួតពិនិត្យ...");
-
-    // Send to Admin Bot
-    await sendToBot2ForApproval(userId, username, userData[userId].udid, userData[userId].payment_option);
-});
-
-// Handle Text Input (UDID)
-bot1.on('text', async (ctx) => {
-    const text = ctx.message.text.trim();
-    // Ignore commands
-    if (text.startsWith('/')) return;
-
-    const userId = ctx.from.id;
-
-    if (!validateUdid(text)) {
-        return ctx.reply("❌ *ទម្រង់ UDID មិនត្រឹមត្រូវ*\nUDID ត្រូវតែមានលេខនិងអក្សរប្រវែង 20-50 តួ។", { parse_mode: 'MarkdownV2' });
-    }
-
-    userData[userId] = { udid: text };
-    
-    const keyboard = Markup.inlineKeyboard([
-        Markup.button.callback('🟢 Esign Premium - 10$', 'payment_10')
-    ]);
-
-    const caption = `✅ <b>បានទទួល UDID:</b> <code>${text}</code>\n\n👇 <b>ជ្រេីសរេីសតម្លៃ:</b>`;
-    
-    await ctx.replyWithPhoto(PAYMENT_PHOTO_URL, {
-        caption: caption,
-        parse_mode: 'HTML',
-        ...keyboard
-    });
-});
-
-// --- BOT 2 HANDLERS (ADMIN) ---
-
-bot2.on('callback_query', async (ctx) => {
-    const data = ctx.callbackQuery.data;
-    await ctx.answerCbQuery();
-
-    const [action, userIdStr] = data.split('_');
-    const userId = parseInt(userIdStr);
-
-    if (action === 'copyudid') {
-        const userInfo = pendingApprovals[userId];
-        if (userInfo) {
-            return ctx.reply(`\`${userInfo.udid}\``, { parse_mode: 'MarkdownV2' });
-        } else {
-            return ctx.reply("រកមិនឃើញទិន្នន័យ។");
-        }
-    }
-
-    if (!pendingApprovals[userId]) {
-        return ctx.editMessageText("❌ សំណើរនេះត្រូវបានដំណើរការរួចហើយ។");
-    }
-
-    const approved = (action === 'approve');
-
-    // Notify User & Save
-    await sendResponseToUser(userId, approved);
-
-    const status = approved ? "✅ បានអនុម័ត" : "❌ បានបដិសេធ";
-    
-    // Update Admin Message
-    // Note: Telegraf doesn't give easy access to original text in caption edits sometimes,
-    // so we just append status
-    try {
-        await ctx.editMessageText(`${ctx.callbackQuery.message.text}\n\nស្ថានភាព: ${status}`, { reply_markup: undefined });
-    } catch (e) {
-        // If message content is same or text issue
-        await ctx.editMessageReplyMarkup(undefined);
-        await ctx.reply(`User ${userId}: ${status}`);
-    }
-
-    // Cleanup
-    delete pendingApprovals[userId];
-    if (approved && userData[userId]) delete userData[userId];
-});
-
-// --- MAIN EXECUTION ---
-
-const launchBots = async () => {
-    console.log("🚀 Starting Bots...");
-    console.log(`🔗 Connected to Backend: ${BACKEND_API_URL}`);
-
-    // Enable graceful stop
-    const stopBots = (signal) => {
-        bot1.stop(signal);
-        bot2.stop(signal);
-    };
-    process.once('SIGINT', () => stopBots('SIGINT'));
-    process.once('SIGTERM', () => stopBots('SIGTERM'));
-
-    await Promise.all([
-        bot1.launch(),
-        bot2.launch()
-    ]);
-    console.log("✅ Both Bots are running!");
-};
-
-launchBots().catch(err => console.error(err));
